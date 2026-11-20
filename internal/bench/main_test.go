@@ -25,7 +25,7 @@ func script(t *testing.T, dir, name, body string) string {
 
 func oneFixture(dir string) ([]fixture, error) {
 	p := filepath.Join(dir, "fix")
-	return []fixture{{"stand-in", p}}, os.WriteFile(p, []byte("not really an ELF"), 0o644)
+	return []fixture{{name: "stand-in", path: p}, {name: "stand-in grow", path: p, grow: true}}, os.WriteFile(p, []byte("not really an ELF"), 0o644)
 }
 
 func TestRunTable(t *testing.T) {
@@ -36,12 +36,13 @@ func TestRunTable(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	// reference line, blank, header, rule, then one row per operation
-	if len(lines) != 4+4 || !strings.HasPrefix(lines[0], "reference: tool 1.0; rounds: 3") {
+	// reference line, blank, header, rule, then one row per operation: four
+	// for a fixture linked with room, three growth ones for the other
+	if len(lines) != 4+4+3 || !strings.HasPrefix(lines[0], "reference: tool 1.0; rounds: 3") {
 		t.Fatalf("%d lines:\n%s", len(lines), out.String())
 	}
 	for _, l := range lines[4:] {
-		if !strings.HasPrefix(l, "| stand-in | `--") || !strings.HasSuffix(l, "x |") {
+		if !strings.HasPrefix(l, "| stand-in | `--") && !strings.HasPrefix(l, "| stand-in grow | `--") || !strings.HasSuffix(l, "x |") {
 			t.Fatalf("bad row %q", l)
 		}
 	}
@@ -63,7 +64,9 @@ func TestRunFailures(t *testing.T) {
 		{"bad flag", []string{"-nope"}, oneFixture, "flag provided but not defined"},
 		{"zero rounds", []string{"-rounds", "0"}, oneFixture, "at least 1"},
 		{"fixture vanished", []string{"-patchelf", good, "-elfpatch", good, "-rounds", "1"},
-			func(dir string) ([]fixture, error) { return []fixture{{"gone", filepath.Join(dir, "missing")}}, nil }, "missing"},
+			func(dir string) ([]fixture, error) {
+				return []fixture{{name: "gone", path: filepath.Join(dir, "missing")}}, nil
+			}, "missing"},
 	} {
 		err := run(tc.args, &bytes.Buffer{}, tc.mk)
 		if err == nil || !strings.Contains(err.Error(), tc.want) {

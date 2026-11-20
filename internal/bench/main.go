@@ -5,8 +5,10 @@
 //
 //	taskset -c 0 ./bench -patchelf $(which patchelf) -elfpatch ./elfpatch
 //
-// It builds three fixtures: small (a few KiB), 4 MiB and 32 MiB, each linked
-// with a long -rpath placeholder so every edit fits in place.
+// It builds three sizes: small (a few KiB), 4 MiB and 32 MiB, each twice: linked
+// with a long -rpath placeholder, so that every edit fits in place, and with a
+// short one, so that the edits of the growth table (a long rpath, --add-needed,
+// a long interpreter) must grow the file.
 package main
 
 import (
@@ -33,6 +35,13 @@ type op struct {
 	name string
 	args []string
 	edit bool
+}
+
+// growOps are edits that do not fit in a linker-reserved slot.
+var growOps = []op{
+	{"--set-rpath (300 bytes)", []string{"--set-rpath", "$ORIGIN/lib:/" + strings.Repeat("r", 300)}, true},
+	{"--add-needed libextra.so.1", []string{"--add-needed", "libextra.so.1"}, true},
+	{"--set-interpreter (300 bytes)", []string{"--set-interpreter", "/" + strings.Repeat("i", 300)}, true},
 }
 
 // run is main without the process: arguments, output and the fixture builder
@@ -71,7 +80,11 @@ func run(args []string, w io.Writer, mk func(dir string) ([]fixture, error)) err
 	fmt.Fprintln(w, "| file | operation | patchelf | elfpatch | speedup |")
 	fmt.Fprintln(w, "|---|---|---:|---:|---:|")
 	for _, f := range files {
-		for _, o := range ops {
+		fileOps := ops
+		if f.grow {
+			fileOps = growOps
+		}
+		for _, o := range fileOps {
 			var tp, te []time.Duration
 			for r := 0; r < *rounds; r++ {
 				order := []*string{pe, ep}
@@ -125,10 +138,30 @@ func timeOne(dir, tool string, o op, src string) (time.Duration, error) {
 	return d, nil
 }
 
-type fixture struct{ name, path string }
+type fixture struct {
+	name, path string
+	grow       bool // linked with a short rpath, for the growth operations
+}
 
 func fixtures(dir string) ([]fixture, error) {
 	var out []fixture
+	for _, grow := range []bool{false, true} {
+		fs, err := fixturesFor(dir, grow)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, fs...)
+	}
+	return out, nil
+}
+
+func fixturesFor(dir string, grow bool) ([]fixture, error) {
+	var out []fixture
+	rpath := "/placeholder/" + strings.Repeat("p", 100)
+	suffix := ""
+	if grow {
+		rpath, suffix = "/x", "-grow"
+	}
 	for _, f := range []struct {
 		name string
 		mib  int
@@ -141,12 +174,16 @@ func fixtures(dir string) ([]fixture, error) {
 		if err := os.WriteFile(src, []byte(body), 0o644); err != nil {
 			return nil, err
 		}
-		bin := filepath.Join(dir, fmt.Sprintf("fixture-%d", f.mib))
-		cc := exec.Command("gcc", "-O1", "-o", bin, src, "-lm", "-Wl,--enable-new-dtags", "-Wl,-rpath,/placeholder/"+strings.Repeat("p", 100))
+		bin := filepath.Join(dir, fmt.Sprintf("fixture-%d%s", f.mib, suffix))
+		cc := exec.Command("gcc", "-O1", "-o", bin, src, "-lm", "-Wl,--enable-new-dtags", "-Wl,-rpath,"+rpath)
 		if b, err := cc.CombinedOutput(); err != nil {
 			return nil, fmt.Errorf("gcc: %v: %s", err, b)
 		}
-		out = append(out, fixture{f.name, bin})
+		name := f.name
+		if grow {
+			name += ", short rpath"
+		}
+		out = append(out, fixture{name, bin, grow})
 	}
 	return out, nil
 }
