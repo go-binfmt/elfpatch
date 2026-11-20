@@ -82,5 +82,5 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "$DIST"/* --clobber
           else
-            gh release create "$TAG" "$DIST"/* --title "$TAG" --notes "Static elfpatch binaries (CGO_ENABLED=0). Verify against SHA256SUMS; each file carries a Sigstore provenance attestation (gh attestation verify -R go-zpkg/elfpatch <file>)."
+            gh release create "$TAG" "$DIST"/* --title "$TAG" --notes "Static elfpatch binaries (CGO_ENABLED=0). Verify against SHA256SUMS; each file carries a Sigstore provenance attestation (gh attestation verify -R go-binfmt/elfpatch <file>)."
           fi

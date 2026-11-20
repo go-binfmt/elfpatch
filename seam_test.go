@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-zpkg/elfpatch/internal/elfgen"
+	"github.com/go-binfmt/elfpatch/internal/elfgen"
 )
 
 var errBoom = errors.New("map boom")

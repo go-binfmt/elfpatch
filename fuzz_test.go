@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/go-zpkg/elfpatch/internal/elfgen"
+	"github.com/go-binfmt/elfpatch/internal/elfgen"
 )
 
 // FuzzParse feeds arbitrary bytes to the parser and, when they parse, to every

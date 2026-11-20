@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/go-zpkg/elfpatch/internal/elfgen"
+	"github.com/go-binfmt/elfpatch/internal/elfgen"
 )
 
 func wantMsg(t *testing.T, err error, is error, msg string) {
