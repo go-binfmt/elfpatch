@@ -97,23 +97,28 @@ Single core, process wall time, interleaved rounds, medians, against patchelf
 on the same files (`internal/bench`, run pinned with `taskset -c 0`). Fixtures
 are gcc-built executables with a long `-rpath` placeholder so every edit fits.
 
-patchelf 0.18.0 (Debian trixie), linux/arm64 in a container on Apple silicon,
-30 rounds. The CI `bench` job prints the same table on the Ubuntu x86-64 runner.
+Ubuntu x86-64 GitHub runner (the CI `bench` job, run 44719076189, pinned to one core
+with taskset, load average 0.7), patchelf 0.18.0 from apt, 60 interleaved rounds, median
+wall time of the whole process:
 
 | file | operation | patchelf | elfpatch | patchelf / elfpatch |
 |---|---|---:|---:|---:|
-| small (~16 KiB) | `--print-rpath` | 610µs | 1.71ms | 0.4x |
-| small (~16 KiB) | `--print-needed` | 580µs | 1.68ms | 0.3x |
-| small (~16 KiB) | `--set-rpath '$ORIGIN/lib'` | 620µs | 1.74ms | 0.4x |
-| small (~16 KiB) | `--remove-needed libm.so.6` | 620µs | 1.75ms | 0.4x |
-| 4 MiB | `--print-rpath` | 1.29ms | 1.85ms | 0.7x |
-| 4 MiB | `--print-needed` | 1.3ms | 1.84ms | 0.7x |
-| 4 MiB | `--set-rpath '$ORIGIN/lib'` | 1.97ms | 3.03ms | 0.6x |
-| 4 MiB | `--remove-needed libm.so.6` | 1.95ms | 3.21ms | 0.6x |
-| 32 MiB | `--print-rpath` | 3.15ms | 2.23ms | 1.4x |
-| 32 MiB | `--print-needed` | 3.06ms | 2.07ms | 1.5x |
-| 32 MiB | `--set-rpath '$ORIGIN/lib'` | 7.79ms | 9.21ms | 0.8x |
-| 32 MiB | `--remove-needed libm.so.6` | 7.97ms | 9.17ms | 0.9x |
+| small (~16 KiB) | `--print-rpath` | 1.18ms | 1.94ms | 0.6x |
+| small (~16 KiB) | `--print-needed` | 1.16ms | 1.94ms | 0.6x |
+| small (~16 KiB) | `--set-rpath '$ORIGIN/lib'` | 1.34ms | 2.17ms | 0.6x |
+| small (~16 KiB) | `--remove-needed libm.so.6` | 1.33ms | 2.21ms | 0.6x |
+| 4 MiB | `--print-rpath` | 2.91ms | 2.01ms | 1.4x |
+| 4 MiB | `--print-needed` | 2.96ms | 2.04ms | 1.4x |
+| 4 MiB | `--set-rpath '$ORIGIN/lib'` | 10.55ms | 9.63ms | 1.1x |
+| 4 MiB | `--remove-needed libm.so.6` | 10.57ms | 9.66ms | 1.1x |
+| 32 MiB | `--print-rpath` | 18.35ms | 2.22ms | 8.3x |
+| 32 MiB | `--print-needed` | 18.39ms | 2.23ms | 8.3x |
+| 32 MiB | `--set-rpath '$ORIGIN/lib'` | 122.35ms | 102.19ms | 1.2x |
+| 32 MiB | `--remove-needed libm.so.6` | 122.35ms | 106.97ms | 1.1x |
+
+On a developer machine (linux/arm64 container on Apple silicon, 30 rounds) the large-file
+edits are about even with patchelf (0.8-0.9x) and prints are 1.4-1.5x faster; the small-file
+gap is the same.
 
 Reading it: a Go process starts slower than a C one, and the cobra command tree
 the fleet standardises on adds to that, so on a 16 KiB file elfpatch is behind

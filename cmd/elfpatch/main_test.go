@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -179,9 +180,23 @@ func TestVersionAndHelp(t *testing.T) {
 }
 
 func TestVersionOverride(t *testing.T) {
-	Version = "v9.9.9"
-	defer func() { Version = "dev" }()
-	if out, _, _ := do(t, "--version"); out != "elfpatch v9.9.9\n" {
+	defer func(f func() (*debug.BuildInfo, bool)) { readBuildInfo = f; Version = "dev" }(readBuildInfo)
+	stamped := func(v string) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) { return &debug.BuildInfo{Main: debug.Module{Version: v}}, true }
+	}
+	for _, tc := range []struct{ ldflag, stamp, want string }{
+		{"v9.9.9", "v1.2.3", "v9.9.9"}, // -ldflags wins over the stamp
+		{"dev", "v1.2.3", "v1.2.3"},    // else the module version Go stamped
+		{"dev", "(devel)", "dev"},      // an unstamped build
+		{"dev", "", "dev"},             // no version at all
+	} {
+		Version, readBuildInfo = tc.ldflag, stamped(tc.stamp)
+		if out, _, _ := do(t, "--version"); out != "elfpatch "+tc.want+"\n" {
+			t.Fatalf("%+v: %q", tc, out)
+		}
+	}
+	Version, readBuildInfo = "dev", func() (*debug.BuildInfo, bool) { return nil, false }
+	if out, _, _ := do(t, "--version"); out != "elfpatch dev\n" {
 		t.Fatal(out)
 	}
 }

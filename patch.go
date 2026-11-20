@@ -148,28 +148,27 @@ func guard(fn func() error) (err error) {
 }
 
 func openRegular(path string) (*os.File, int, os.FileInfo, error) {
-	fh, err := os.Open(path)
+	st, err := os.Stat(path)
 	if err != nil {
-		return nil, 0, nil, err
-	}
-	st, err := fh.Stat()
-	if err != nil {
-		fh.Close()
 		return nil, 0, nil, err
 	}
 	switch {
 	case !st.Mode().IsRegular():
-		fh.Close()
 		return nil, 0, nil, fmt.Errorf("elfpatch: %s is not a regular file", path)
-	case st.Size() > maxFile:
-		fh.Close()
-		return nil, 0, nil, fmt.Errorf("%w: %s is larger than 2 GiB", ErrUnsupported, path)
+	case uint64(st.Size()) > maxFile:
+		return nil, 0, nil, fmt.Errorf("%w: %s is larger than the %d-byte limit", ErrUnsupported, path, maxFile)
 	case st.Size() == 0:
-		fh.Close()
-		return nil, 0, nil, ErrNotELF
+		return nil, 0, nil, fmt.Errorf("%w: %s is empty", ErrNotELF, path)
+	}
+	fh, err := os.Open(path)
+	if err != nil {
+		return nil, 0, nil, err
 	}
 	return fh, int(st.Size()), st, nil
 }
+
+// mapFile is replaceable in tests, which cannot otherwise make a map fail.
+var mapFile = sysMap
 
 // Open maps path read-only and parses it. Only the pages the parser touches
 // are read, so a print costs the same on a 32 MiB binary as on a 16 KiB one.

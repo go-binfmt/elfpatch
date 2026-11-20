@@ -10,7 +10,7 @@ import (
 // mapFile maps fh. Read-only maps are shared; writable ones are PRIVATE
 // (copy-on-write), so edits never reach the file and only the pages an edit
 // touches are copied.
-func mapFile(fh *os.File, size int, write bool) ([]byte, func() error, error) {
+func sysMap(fh *os.File, size int, write bool) ([]byte, func() error, error) {
 	prot, flags := syscall.PROT_READ, syscall.MAP_SHARED
 	if write {
 		prot, flags = syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_PRIVATE

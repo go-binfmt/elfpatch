@@ -22,9 +22,6 @@ func (c Change) String() string {
 // write is the only way an edit changes the image: it declares the range and
 // writes it, so the verifier knows exactly what was meant to change.
 func (f *File) write(off uint64, b []byte) {
-	if len(b) == 0 {
-		return
-	}
 	f.allowed = append(f.allowed, rng{off, off + uint64(len(b))})
 	if inRange(off, uint64(len(b)), uint64(len(f.data))) {
 		copy(f.data[off:], b)

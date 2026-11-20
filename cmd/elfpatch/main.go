@@ -20,11 +20,14 @@ import (
 // version Go stamped into the binary is used, and "dev" for an unstamped build.
 var Version = "dev"
 
+// readBuildInfo is replaceable in tests.
+var readBuildInfo = debug.ReadBuildInfo
+
 func version() string {
 	if Version != "dev" {
 		return Version
 	}
-	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
+	if bi, ok := readBuildInfo(); ok && bi.Main.Version != "" && bi.Main.Version != "(devel)" {
 		return bi.Main.Version
 	}
 	return Version
@@ -201,9 +204,14 @@ func one(cmd *cobra.Command, o *opts, file string, edits bool) error {
 			}
 		}
 	}
-	if !edits {
-		return nil
+	if edits {
+		return edit(cmd, o, file)
 	}
+	return nil
+}
+
+func edit(cmd *cobra.Command, o *opts, file string) error {
+	out := cmd.OutOrStdout()
 	po := elfpatch.Options{DryRun: o.dryRun, Output: o.output}
 	cs, err := elfpatch.Patch(file, po, func(f *elfpatch.File) ([]elfpatch.Change, error) {
 		var all []elfpatch.Change
@@ -242,10 +250,7 @@ func one(cmd *cobra.Command, o *opts, file string, edits bool) error {
 		return all, nil
 	})
 	if err != nil {
-		if errors.Is(err, elfpatch.ErrNoSpace) || errors.Is(err, elfpatch.ErrNoRpath) {
-			return fmt.Errorf("%w; nothing written (growing the file is phase 2)", err)
-		}
-		return err
+		return err // ErrNoSpace and ErrNoRpath already name phase 2
 	}
 	if o.dryRun {
 		for _, c := range cs {

@@ -10,8 +10,10 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +23,7 @@ import (
 )
 
 func main() {
-	if err := run(); err != nil {
+	if err := run(os.Args[1:], os.Stdout, fixtures); err != nil {
 		fmt.Fprintln(os.Stderr, "bench:", err)
 		os.Exit(1)
 	}
@@ -33,23 +35,32 @@ type op struct {
 	edit bool
 }
 
-func run() error {
-	pe := flag.String("patchelf", "patchelf", "patchelf binary")
-	ep := flag.String("elfpatch", "elfpatch", "elfpatch binary")
-	rounds := flag.Int("rounds", 40, "interleaved rounds per operation and file")
-	flag.Parse()
+// run is main without the process: arguments, output and the fixture builder
+// are parameters so a test can drive it with stand-in tools.
+func run(args []string, w io.Writer, mk func(dir string) ([]fixture, error)) error {
+	fs := flag.NewFlagSet("bench", flag.ContinueOnError)
+	fs.SetOutput(w)
+	pe := fs.String("patchelf", "patchelf", "patchelf binary")
+	ep := fs.String("elfpatch", "elfpatch", "elfpatch binary")
+	rounds := fs.Int("rounds", 40, "interleaved rounds per operation and file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *rounds < 1 {
+		return errors.New("-rounds must be at least 1")
+	}
 	dir, err := os.MkdirTemp("", "elfpatch-bench-")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(dir)
 
-	files, err := fixtures(dir)
+	files, err := mk(dir)
 	if err != nil {
 		return err
 	}
 	ver, _ := exec.Command(*pe, "--version").Output()
-	fmt.Printf("reference: %s; rounds: %d; median wall time per process, interleaved\n\n", strings.TrimSpace(string(ver)), *rounds)
+	fmt.Fprintf(w, "reference: %s; rounds: %d; median wall time per process, interleaved\n\n", strings.TrimSpace(string(ver)), *rounds)
 
 	ops := []op{
 		{"--print-rpath", []string{"--print-rpath"}, false},
@@ -57,8 +68,8 @@ func run() error {
 		{"--set-rpath '$ORIGIN/lib'", []string{"--set-rpath", "$ORIGIN/lib"}, true},
 		{"--remove-needed libm.so.6", []string{"--remove-needed", "libm.so.6"}, true},
 	}
-	fmt.Println("| file | operation | patchelf | elfpatch | speedup |")
-	fmt.Println("|---|---|---:|---:|---:|")
+	fmt.Fprintln(w, "| file | operation | patchelf | elfpatch | speedup |")
+	fmt.Fprintln(w, "|---|---|---:|---:|---:|")
 	for _, f := range files {
 		for _, o := range ops {
 			var tp, te []time.Duration
@@ -80,7 +91,7 @@ func run() error {
 				}
 			}
 			mp, me := median(tp), median(te)
-			fmt.Printf("| %s | `%s` | %s | %s | %.1fx |\n", f.name, o.name, mp.Round(10*time.Microsecond), me.Round(10*time.Microsecond), float64(mp)/float64(me))
+			fmt.Fprintf(w, "| %s | `%s` | %s | %s | %.1fx |\n", f.name, o.name, mp.Round(10*time.Microsecond), me.Round(10*time.Microsecond), float64(mp)/float64(me))
 		}
 	}
 	return nil

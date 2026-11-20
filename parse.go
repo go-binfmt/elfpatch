@@ -80,11 +80,11 @@ const (
 	dtVerneed  = 0x6ffffffe
 	dtVerneedN = 0x6fffffff
 	dtGnuHash  = 0x6ffffef5
-
-	// maxFile bounds what we load: also keeps every offset inside int on
-	// 32-bit platforms.
-	maxFile = math.MaxInt32
 )
+
+// maxFile bounds what we load: it also keeps every offset inside int on 32-bit
+// platforms. A variable only so a test can lower it.
+var maxFile uint64 = math.MaxInt32
 
 type prog struct {
 	typ           uint32
