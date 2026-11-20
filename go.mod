@@ -1,4 +1,4 @@
-module github.com/go-zpkg/elfpatch
+module github.com/go-binfmt/elfpatch
 
 go 1.27.4
 

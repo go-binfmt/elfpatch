@@ -12,7 +12,7 @@ import (
 	"runtime/debug"
 	"strings"
 
-	"github.com/go-zpkg/elfpatch"
+	"github.com/go-binfmt/elfpatch"
 	"github.com/spf13/cobra"
 )
 

@@ -9,7 +9,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/go-zpkg/elfpatch/internal/elfgen"
+	"github.com/go-binfmt/elfpatch/internal/elfgen"
 )
 
 type variant struct {

@@ -6,7 +6,7 @@ and **DT_NEEDED** of ELF files. No cgo, no C toolchain, static binaries for
 Linux, macOS, the BSDs and Windows.
 
 ```
-go install github.com/go-zpkg/elfpatch/cmd/elfpatch@latest
+go install github.com/go-binfmt/elfpatch/cmd/elfpatch@latest
 
 elfpatch --print-rpath bin/tool
 elfpatch --set-rpath '$ORIGIN/../lib' bin/tool
@@ -15,7 +15,7 @@ elfpatch --remove-needed libm.so.6 --shrink-rpath bin/tool
 elfpatch --dry-run --set-rpath '$ORIGIN/lib' bin/tool     # prints the change, writes nothing
 ```
 
-The library is `github.com/go-zpkg/elfpatch` (`Open`, `Parse`, `Patch`, and the
+The library is `github.com/go-binfmt/elfpatch` (`Open`, `Parse`, `Patch`, and the
 `File` methods `Interpreter`, `Needed`, `Soname`, `Rpath`, `Runpath`,
 `SetInterpreter`, `SetRpath`, `RemoveRpath`, `RemoveNeeded`, `ReplaceNeeded`,
 `ShrinkRpath`).

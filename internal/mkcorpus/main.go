@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/go-zpkg/elfpatch/internal/elfgen"
+	"github.com/go-binfmt/elfpatch/internal/elfgen"
 )
 
 func main() {
