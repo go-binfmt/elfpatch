@@ -370,9 +370,8 @@ func (f *File) SetRpath(value string, force bool) ([]Change, error) {
 	skip := map[int]bool{idx: true}
 	shared, serr := f.refsInto(f.dyn[idx].val, uint64(len(old)), skip)
 	fits := len(value) <= len(old)
-	if fits && serr != nil {
-		return nil, serr // sharing cannot be judged: as in place, refuse
-	}
+	// A fit that cannot be judged shared (serr) goes the in-place way, whose
+	// own check then refuses it, as in phase 1.
 	if fits && !shared {
 		if err := f.writeSlot(field, f.dyn[idx].val, len(old), value, skip); err != nil {
 			return nil, err
@@ -501,10 +500,7 @@ func (f *File) ReplaceNeeded(old, new string) ([]Change, error) {
 			}
 		}
 		done[e.val] = true
-		shared, serr := f.refsInto(e.val, uint64(len(s)), skip)
-		if len(new) <= len(s) && serr != nil {
-			return nil, serr
-		}
+		shared, _ := f.refsInto(e.val, uint64(len(s)), skip) // an unjudgeable fit is refused by writeSlot below
 		if len(new) <= len(s) && !shared {
 			if err := f.writeSlot("needed", e.val, len(s), new, skip); err != nil {
 				return nil, err

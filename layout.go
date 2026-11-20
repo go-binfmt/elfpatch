@@ -478,14 +478,10 @@ func roundUp(n, m uint64) uint64 {
 	return ((n-1)/m + 1) * m
 }
 
-// grow resizes the image to n bytes, zero-filling.
+// grow extends the image to n bytes (n is at least its length), zero-filling.
 func (l *layout) grow(n uint64) {
 	if n > maxFile {
 		l.fail("the result would be %d bytes, over the %d-byte limit", n, maxFile)
-	}
-	if n <= uint64(len(l.data)) {
-		l.data = l.data[:n]
-		return
 	}
 	d := make([]byte, n)
 	copy(d, l.data)

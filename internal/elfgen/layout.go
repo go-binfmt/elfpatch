@@ -20,6 +20,9 @@ type LSpec struct {
 	Symbols  []string
 	// Notes adds a .note section and its PT_NOTE.
 	Notes bool
+	// Verneed adds a .gnu.version_r with one entry per file name, each needing
+	// one version; the names share their strings with Needed, as a linker's do.
+	Verneed []string
 	// Tail adds a non-allocated tail section of this many bytes after the
 	// writable segment, so that the file no longer ends in it.
 	Tail int
@@ -78,8 +81,13 @@ func BuildLayout(s LSpec) []byte {
 
 	// .dynstr
 	str := []byte{0}
+	seen := map[string]int{}
 	add := func(x string) int {
+		if off, ok := seen[x]; ok {
+			return off
+		}
 		off := len(str)
+		seen[x] = off
 		str = append(str, x...)
 		str = append(str, 0)
 		return off
@@ -94,6 +102,14 @@ func BuildLayout(s LSpec) []byte {
 	}
 	if s.Rpath != "" {
 		rpathOff = add(s.Rpath)
+	}
+	var verFile []int
+	verAux := -1
+	for _, n := range s.Verneed {
+		verFile = append(verFile, add(n))
+	}
+	if len(verFile) > 0 {
+		verAux = add("GLIBC_2.0")
 	}
 	var symStr []int
 	for _, n := range s.Symbols {
@@ -123,6 +139,7 @@ func BuildLayout(s LSpec) []byte {
 	cur := phEnd
 	type sec struct {
 		name       string
+		nameOff    int
 		typ        uint32
 		flags      uint64
 		off, size  int
@@ -135,7 +152,7 @@ func BuildLayout(s LSpec) []byte {
 	var secs []*sec
 	newSec := func(name string, typ uint32, flags uint64, size, alignment int) *sec {
 		cur = align(cur, alignment)
-		x := &sec{name: name, typ: typ, flags: flags, off: cur, size: size, alignment: alignment, idx: len(secs) + 1}
+		x := &sec{name: name, nameOff: nameOf(name), typ: typ, flags: flags, off: cur, size: size, alignment: alignment, idx: len(secs) + 1}
 		cur += size
 		secs = append(secs, x)
 		return x
@@ -151,6 +168,10 @@ func BuildLayout(s LSpec) []byte {
 	hash := newSec(".hash", 5, 2, 4*(2+1+nsym), 4)
 	dynsym := newSec(".dynsym", 11, 2, nsym*symEnt, w)
 	dynstr := newSec(".dynstr", 3, 2, len(str), 1)
+	var vr *sec
+	if len(verFile) > 0 {
+		vr = newSec(".gnu.version_r", 0x6ffffffe, 2, len(verFile)*32, 4)
+	}
 	firstEnd := cur
 
 	cur = align(firstEnd, page)
@@ -159,6 +180,9 @@ func BuildLayout(s LSpec) []byte {
 
 	cur = align(textEnd, page)
 	nd := len(neededOff) + 5 + s.FreeDyn // + HASH STRTAB SYMTAB STRSZ SYMENT
+	if vr != nil {
+		nd += 2 // VERNEED VERNEEDNUM
+	}
 	if sonameOff >= 0 {
 		nd++
 	}
@@ -173,9 +197,6 @@ func BuildLayout(s LSpec) []byte {
 		_ = newSec(".comment", 1, 0, s.Tail, 1)
 	}
 	shstr := newSec(".shstrtab", 3, 0, 0, 1)
-	for _, x := range secs {
-		_ = nameOf(x.name)
-	}
 	// .shstrtab names itself too; sizes are known now.
 	shstr.size = len(names)
 	cur = shstr.off + shstr.size
@@ -192,6 +213,9 @@ func BuildLayout(s LSpec) []byte {
 	}
 	hash.link, hash.entsize = uint32(dynsym.idx), 4
 	dynsym.link, dynsym.info, dynsym.entsize = uint32(dynstr.idx), 1, symEnt
+	if vr != nil {
+		vr.link, vr.info = uint32(dynstr.idx), uint32(len(verFile))
+	}
 	dynamic.link, dynamic.entsize = uint32(dynstr.idx), dynent
 
 	// ELF header
@@ -311,11 +335,26 @@ func BuildLayout(s LSpec) []byte {
 	if rpathOff >= 0 {
 		dyn = append(dyn, ent{uint64(s.RpathTag), uint64(rpathOff)})
 	}
+	if vr != nil {
+		dyn = append(dyn, ent{0x6ffffffe, uint64(vr.addr)}, ent{0x6fffffff, uint64(len(verFile))})
+	}
 	dyn = append(dyn, ent{4, uint64(hash.addr)}, ent{5, uint64(dynstr.addr)}, ent{6, uint64(dynsym.addr)},
 		ent{10, uint64(len(str))}, ent{11, uint64(symEnt)})
 	for k, e := range dyn {
 		put(b[dynamic.off+k*dynent:], e.tag)
 		put(b[dynamic.off+k*dynent+w:], e.val)
+	}
+	for i, f := range verFile {
+		v := b[vr.off+i*32:]
+		o.PutUint16(v, 1)
+		o.PutUint16(v[2:], 1)
+		o.PutUint32(v[4:], uint32(f))
+		o.PutUint32(v[8:], 16)
+		if i+1 < len(verFile) {
+			o.PutUint32(v[12:], 32)
+		}
+		o.PutUint16(v[16+6:], 2)
+		o.PutUint32(v[16+8:], uint32(verAux))
 	}
 	copy(b[shstr.off:], names)
 	if note != nil {
@@ -332,7 +371,7 @@ func BuildLayout(s LSpec) []byte {
 	// section headers
 	for _, x := range secs {
 		h := b[shoff+x.idx*shent:]
-		o.PutUint32(h, uint32(nameIndex(names, x.name)))
+		o.PutUint32(h, uint32(x.nameOff))
 		o.PutUint32(h[4:], x.typ)
 		if is32 {
 			o.PutUint32(h[8:], uint32(x.flags))
@@ -357,12 +396,23 @@ func BuildLayout(s LSpec) []byte {
 	return b
 }
 
-// nameIndex finds the offset of name in a section-name table.
-func nameIndex(names []byte, name string) int {
-	for i := 1; i+len(name) < len(names); i++ {
-		if string(names[i:i+len(name)]) == name && names[i+len(name)] == 0 && names[i-1] == 0 {
-			return i
+// GrowSeeds is the list of layout images the growth fuzz corpus is made from:
+// every class and byte order, executable and shared object, three page sizes,
+// with and without notes, PT_PHDR and a file tail.
+func GrowSeeds() []LSpec {
+	var out []LSpec
+	for _, class := range []int{64, 32} {
+		for _, be := range []bool{false, true} {
+			for _, exec := range []bool{true, false} {
+				for _, m := range []uint16{0, 183, 2} {
+					out = append(out, LSpec{
+						Class: class, BigEndian: be, Exec: exec, Machine: m, Notes: m == 183, Tail: int(m) * 16, NoPhdr: m == 2,
+						Interp: "/lib/ld.so.1", Needed: []string{"libm.so.6", "libc.so.6"}, Soname: "libx.so.1",
+						Rpath: "/a", Symbols: []string{"alpha", "beta"}, Verneed: []string{"libm.so.6"},
+					})
+				}
+			}
 		}
 	}
-	return 0
+	return out
 }

@@ -1,4 +1,5 @@
-// Command mkcorpus writes the committed fuzz seeds (testdata/fuzz/FuzzParse)
+// Command mkcorpus writes the committed fuzz seeds (testdata/fuzz/FuzzParse and
+// testdata/fuzz/FuzzGrow)
 // and fixture images (testdata/*.elf) from internal/elfgen. Run from the
 // repository root: go run ./internal/mkcorpus
 package main
@@ -49,6 +50,18 @@ func run(dir string) error {
 					return err
 				}
 			}
+		}
+	}
+	grow := filepath.Join(dir, "fuzz", "FuzzGrow")
+	if err := os.MkdirAll(grow, 0o755); err != nil {
+		return err
+	}
+	for i, s := range elfgen.GrowSeeds() {
+		img := elfgen.BuildLayout(s)
+		seed := fmt.Sprintf("go test fuzz v1\n[]byte(%q)\n", img)
+		name := fmt.Sprintf("layout-%02d-%d-be%v-exec%v-m%d", i, s.Class, s.BigEndian, s.Exec, s.Machine)
+		if err := os.WriteFile(filepath.Join(grow, name), []byte(seed), 0o644); err != nil {
+			return err
 		}
 	}
 	return nil

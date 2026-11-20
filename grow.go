@@ -211,9 +211,6 @@ func (f *File) SetSoname(value string) ([]Change, error) {
 	skip := map[int]bool{i: true}
 	shared, serr := f.refsInto(f.dyn[i].val, uint64(len(old)), skip)
 	fits := len(value) <= len(old)
-	if fits && serr != nil {
-		return nil, serr
-	}
 	if fits && !shared {
 		if err := f.writeSlot("soname", f.dyn[i].val, len(old), value, skip); err != nil {
 			return nil, err

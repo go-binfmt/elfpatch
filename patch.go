@@ -297,45 +297,36 @@ func patch(path string, opts Options, fn func(*File) ([]Change, error)) ([]Chang
 // the destination's directory, then the same checks as writeVerified on the
 // bytes as they landed (they must equal the editor's image, and that image must
 // pass verifyGrown against the input), and only then the rename.
-func writeGrown(dest string, mode os.FileMode, orig []byte, f *File, sync bool) (err error) {
-	tmp, err := os.CreateTemp(filepath.Dir(dest), ".elfpatch-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer func() {
-		if err != nil {
-			tmp.Close()
-			os.Remove(name)
+func writeGrown(dest string, mode os.FileMode, orig []byte, f *File, sync bool) error {
+	fill := func(tmp *os.File) error {
+		if n, err := tmp.Write(f.data); err != nil || n != len(f.data) {
+			return fmt.Errorf("elfpatch: writing %s: %d of %d bytes: %v", tmp.Name(), n, len(f.data), err)
 		}
-	}()
-	if n, err := tmp.Write(f.data); err != nil || n != len(f.data) {
-		return fmt.Errorf("elfpatch: writing %s: %d of %d bytes: %v", name, n, len(f.data), err)
+		return nil
 	}
-	if err := tmp.Chmod(mode & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)); err != nil {
-		return err
-	}
-	if sync {
-		if err := tmp.Sync(); err != nil {
-			return err
-		}
-	}
-	out, unmap, err := mapFile(tmp, len(f.data), false)
-	if err != nil {
-		return err
-	}
-	err = verifyGrown(orig, out, f) // the file as written, not as intended
-	unmap()
-	if err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, dest)
+	return writeTemp(dest, mode, sync, len(f.data), fill, func(out []byte) error { return verifyGrown(orig, out, f) })
 }
 
-func writeVerified(dest string, src *os.File, size int, mode os.FileMode, orig []byte, f *File, sync bool) (err error) {
+func writeVerified(dest string, src *os.File, size int, mode os.FileMode, orig []byte, f *File, sync bool) error {
+	fill := func(tmp *os.File) error {
+		if n, err := tmp.ReadFrom(src); err != nil || n != int64(size) {
+			return fmt.Errorf("elfpatch: copying %s: %d of %d bytes: %v", src.Name(), n, size, err)
+		}
+		for _, r := range f.merged() {
+			if _, err := tmp.WriteAt(f.data[r.off:r.end], int64(r.off)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return writeTemp(dest, mode, sync, size, fill, func(out []byte) error { return verify(orig, out, f) })
+}
+
+// writeTemp is the one atomic write: a temp file next to dest is filled, given
+// the original mode, mapped as it landed, judged by check (the file as written,
+// not as intended), and only then renamed over dest. On any failure nothing is
+// left behind.
+func writeTemp(dest string, mode os.FileMode, sync bool, size int, fill func(*os.File) error, check func(out []byte) error) (err error) {
 	tmp, err := os.CreateTemp(filepath.Dir(dest), ".elfpatch-*")
 	if err != nil {
 		return err
@@ -347,13 +338,8 @@ func writeVerified(dest string, src *os.File, size int, mode os.FileMode, orig [
 			os.Remove(name)
 		}
 	}()
-	if n, err := tmp.ReadFrom(src); err != nil || n != int64(size) {
-		return fmt.Errorf("elfpatch: copying %s: %d of %d bytes: %v", src.Name(), n, size, err)
-	}
-	for _, r := range f.merged() {
-		if _, err := tmp.WriteAt(f.data[r.off:r.end], int64(r.off)); err != nil {
-			return err
-		}
+	if err := fill(tmp); err != nil {
+		return err
 	}
 	if err := tmp.Chmod(mode & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)); err != nil {
 		return err
@@ -367,7 +353,7 @@ func writeVerified(dest string, src *os.File, size int, mode os.FileMode, orig [
 	if err != nil {
 		return err
 	}
-	err = verify(orig, out, f) // the file as written, not as intended
+	err = check(out)
 	unmap()
 	if err != nil {
 		return err

@@ -26,26 +26,26 @@ The library is `github.com/go-binfmt/elfpatch` (`Open`, `Parse`, `Patch`, and th
 `SetInterpreter`, `SetRpath`, `RemoveRpath`, `RemoveNeeded`, `ReplaceNeeded`,
 `ShrinkRpath`).
 
-## Phase 1: in place, verified
+## In place, verified (phase 1)
 
-Phase 1 edits **in place**: a new value is written into the slot the linker
-reserved and zero-padded. A value that does not fit is **refused**
-(`ErrNoSpace`, exit 1, naming phase 2) and nothing is written; it is never
-truncated.
+A value that fits is written **in place**: into the slot the linker reserved,
+zero-padded. Phase 2 (below) grows the file when it does not fit; a file that
+cannot be grown (no section headers) refuses with `ErrNoSpace`, exit 1, and
+nothing is written; a value is never truncated.
 
-| patchelf flag | elfpatch phase 1 |
+| patchelf flag | elfpatch |
 |---|---|
-| `--print-interpreter`, `--print-rpath`, `--print-needed`, `--print-soname` | same output |
-| `--set-interpreter` | in place, must fit `p_filesz` |
-| `--set-rpath` (`--force-rpath`) | in place, must fit the existing string; converts `DT_RPATH` to `DT_RUNPATH` like patchelf; no entry yet is `ErrNoRpath` |
+| `--print-interpreter`, `--print-rpath`, `--print-needed`, `--print-soname` | same output (`--print-soname` prints nothing, exit 0, when there is none or the file is not a shared object, as patchelf does) |
 | `--remove-rpath` | removes the entry (later dynamic entries shift down, as patchelf does) |
 | `--shrink-rpath` | drops directories that provide no `DT_NEEDED` library, and duplicates |
 | `--remove-needed` | removes the entries; no match is not an error |
-| `--replace-needed OLD NEW` | in place, `NEW` must fit `OLD`'s string |
-| `--add-needed`, `--set-soname`, `--add-rpath`, `--page-size`, ... | **phase 2**: refused naming it |
 | `--version`, `--output FILE`, `--dry-run` | yes (`--dry-run` is ours) |
 
-Every write goes through the same checks:
+With several operations on one command line elfpatch applies them in patchelf's
+order: soname, interpreter, one rpath operation (shrink, else remove, else set,
+else add), remove-needed, replace-needed, add-needed.
+
+Every in-place write goes through the same checks:
 
 * **Parse by program headers** (`PT_INTERP`, `PT_DYNAMIC`, `PT_LOAD`), 32/64-bit,
   both byte orders; works on stripped files with no section headers. Every
@@ -69,13 +69,78 @@ Every write goes through the same checks:
   plus the verifier; the corpus is committed under `testdata/fuzz/FuzzParse`.
   CI replays it and fuzzes 60 s per run.
 
-### Phase 2 (not done)
+## Phase 2: growth, the way patchelf does it
 
-Growing a string that does not fit: patchelf adds a `PT_LOAD` and moves
-`.dynstr` / `PT_INTERP` there (its page size comes from `e_machine`,
-`patchelf.cc` 382-406), then fixes `.dynamic`, `.dynsym` references, section
-headers and the hash tables. Phase 2 does the same, plus `--add-needed`,
-`--set-soname`, `--add-rpath` and adding an rpath where there is none.
+A value that does not fit is no longer refused: the file grows. The layout
+engine (`layout.go`) is a port of the section-replacement half of **patchelf
+0.19.3** (`src/patchelf.cc`: `replaceSection`, `writeReplacedSections`,
+`rewriteSectionsLibrary`, `rewriteSectionsExecutable`, `shiftFile`,
+`trimLoadSegments`, `normalizeNoteSegments`, `rewriteHeaders`):
+
+* the new string is appended to `.dynstr` (or `.interp` is rewritten, or an
+  entry is added at the top of `.dynamic`), and the section that grew is
+  **replaced** by a larger copy, placed in new space;
+* a **shared library** gets that space at the end of the file, in a new
+  `PT_LOAD` after the last page, or by extending the last `PT_LOAD` when it is
+  read-write and ends where the file does; the program headers stay at the
+  front when they fit and move there when they do not;
+* an **executable** cannot move its code, so the sections in front of it
+  (`.interp`, notes, hash tables, `.dynsym`, `.dynstr`) are moved into the
+  header page, the file after them is shifted by whole pages, and the header
+  `PT_LOAD` is reused, or split into its own read-write one;
+* the **page size** comes from `e_machine` (`patchelf.cc` 382-406: 64 KiB for
+  aarch64, ppc, mips, ia64, alpha, tilegx, loongarch; 8 KiB for sparc; 4 KiB
+  otherwise), or from `--page-size`;
+* then the program and section headers are rewritten and sorted, the addresses
+  in `.dynamic` follow their sections, and `st_shndx` follows the new section
+  order in `.dynsym` and `.symtab`.
+
+ELF32 and ELF64, both byte orders; every value written into an ELF32 field is
+checked against 32 bits, and a result over 2 GiB is refused. Growth needs
+section headers (patchelf refuses a file without them too): a stripped-of-
+sections file that needs room gets the same `ErrNoSpace` refusal as in phase 1,
+now carrying the reason.
+
+| patchelf flag | elfpatch phase 2 |
+|---|---|
+| `--set-interpreter` | in place when it fits (patchelf always relocates), else `.interp` moves |
+| `--set-rpath` (`--force-rpath`) | in place when it fits and nothing else shares the string; **else appended to `.dynstr`**; no entry yet: a `DT_RUNPATH` (`DT_RPATH`) is added |
+| `--add-rpath DIRS` | `old:DIRS` set as above; adds a `DT_RUNPATH` when there is none |
+| `--set-soname` | shared objects only (patchelf ignores it on `ET_EXEC`): in place when it fits, else appended; none yet: `DT_SONAME` added |
+| `--add-needed LIB` | repeatable; names sorted and added at the **top** of `.dynamic`, so they are searched first (a name already needed is added again, as patchelf does) |
+| `--replace-needed OLD NEW` | in place when it fits and is unshared; else appended (a suffix of the old name just points into it), and the **version-needed** file names follow |
+| `--page-size N` | page size for the layout |
+
+Not done: `--set-os-abi`, `--add-debug-tag`, `--no-default-lib`,
+`--clear-symbol-version`, `--rename-dynamic-symbols`, `--build-resolution-cache`,
+a file with a `.note.nixos.ldcache` note, a file with both `DT_RPATH` and
+`DT_RUNPATH` under `--set-rpath`, and `.gnu.version_r` names that live outside
+`.dynstr`. Each is refused with nothing written.
+
+### What "verified" means for a grown file
+
+The byte-range check of phase 1 cannot judge a file whose layout changed, so
+`verifyGrown` judges it by structure, on the temp file as it was written and
+before the rename:
+
+* the written bytes are the editor's image and it re-parses; the ELF header is
+  unchanged but for the table offsets and counts;
+* every section is still there with the same type, flags, links and contents;
+  only `.interp`, `.dynstr` and `.dynamic` may change size, and `.dynstr` only
+  by appending; a section whose address changed must be one patchelf may move
+  (anything but `PROGBITS`, and `.interp`); `.dynamic` differs only in the
+  entries the edit named and in addresses that follow their section; symbols
+  differ only in `st_shndx` following the sections;
+* every symbol and version name still reads the same string (a renamed
+  `DT_NEEDED` is the one allowed difference), and every field the edit did not
+  target reads back unchanged;
+* the program headers describe the new file: each allocated section sits in a
+  `PT_LOAD` at the offset its address implies, with the permissions its flags
+  need; `PT_INTERP`, `PT_DYNAMIC`, `PT_PHDR` match their section or table; the
+  other segments keep their addresses and sizes; `PT_LOAD`s do not overlap and
+  are congruent with their offsets; none became writable and executable.
+
+Anything else is `ErrVerify` and nothing is renamed.
 
 ## Tested against patchelf
 
