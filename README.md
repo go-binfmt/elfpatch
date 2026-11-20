@@ -1,4 +1,10 @@
-# elfpatch
+<p align="center"><img src="https://raw.githubusercontent.com/go-binfmt/brand/main/social/go-binfmt-elfpatch.png" alt="go-binfmt/elfpatch" width="720"></p>
+
+# go-binfmt/elfpatch
+
+[![CI](https://github.com/go-binfmt/elfpatch/actions/workflows/ci.yml/badge.svg)](https://github.com/go-binfmt/elfpatch/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-binfmt/elfpatch.svg)](https://pkg.go.dev/github.com/go-binfmt/elfpatch)
+[![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-0A6E96)](LICENSE)
 
 A pure-Go replacement for the subset of [NixOS patchelf](https://github.com/NixOS/patchelf)
 that package builders use: read and edit the **interpreter**, **RPATH/RUNPATH**
