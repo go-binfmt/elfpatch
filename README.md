@@ -7,8 +7,9 @@
 [![License: BSD-3-Clause](https://img.shields.io/badge/license-BSD--3--Clause-0A6E96)](LICENSE)
 
 A pure-Go replacement for the subset of [NixOS patchelf](https://github.com/NixOS/patchelf)
-that package builders use: read and edit the **interpreter**, **RPATH/RUNPATH**
-and **DT_NEEDED** of ELF files. No cgo, no C toolchain, static binaries for
+that package builders use: read and edit the **interpreter**, **RPATH/RUNPATH**,
+**DT_SONAME** and **DT_NEEDED** of ELF files, growing the file the way patchelf
+does when a value does not fit. No cgo, no C toolchain, static binaries for
 Linux, macOS, the BSDs and Windows.
 
 ```
@@ -23,8 +24,8 @@ elfpatch --dry-run --set-rpath '$ORIGIN/lib' bin/tool     # prints the change, w
 
 The library is `github.com/go-binfmt/elfpatch` (`Open`, `Parse`, `Patch`, and the
 `File` methods `Interpreter`, `Needed`, `Soname`, `Rpath`, `Runpath`,
-`SetInterpreter`, `SetRpath`, `RemoveRpath`, `RemoveNeeded`, `ReplaceNeeded`,
-`ShrinkRpath`).
+`SetInterpreter`, `SetRpath`, `AddRpath`, `RemoveRpath`, `RemoveNeeded`,
+`ReplaceNeeded`, `AddNeeded`, `SetSoname`, `ShrinkRpath`).
 
 ## In place, verified (phase 1)
 
@@ -51,10 +52,11 @@ Every in-place write goes through the same checks:
   both byte orders; works on stripped files with no section headers. Every
   offset and size is checked against the file length without overflowing
   `uint64`, and the whole file is capped at 2 GiB so it is safe on 32-bit.
-* **Shared strings are refused.** Linkers merge string tails in `.dynstr`.
-  Zero-padding a slot that another name points into (a `DT_NEEDED`, a
-  `.dynsym` name, a version need/definition) would corrupt that name, so the
-  edit is refused (`ErrAmbiguous`) instead.
+* **Shared strings are never overwritten.** Linkers merge string tails in
+  `.dynstr`. Zero-padding a slot that another name points into (a `DT_NEEDED`, a
+  `.dynsym` name, a version need/definition) would corrupt that name, so such
+  an edit does not go in place: it grows (phase 2), or, on a file that cannot
+  grow, is refused (`ErrAmbiguous`).
 * **Atomic.** A temp file in the same directory is created from the original,
   only the edited byte ranges are written into it, the mode (including setuid)
   is applied, then it is renamed over the target. A symlink is followed, so the
@@ -144,23 +146,45 @@ Anything else is `ErrVerify` and nothing is renamed.
 
 ## Tested against patchelf
 
-`differential_test.go` builds real ELF files with gcc (a shared library plus
-three executables linked with `-Wl,-rpath` placeholders: `DT_RUNPATH`,
-`DT_RPATH`, and a mixed path with real and missing directories), applies the
-same edit with patchelf and with elfpatch, and compares:
+`differential_test.go` (edits in place) and `differential_growth_test.go`
+(growth) build real ELF files with gcc (executables, PIE and not, linked with
+`-Wl,-rpath` placeholders or none, and shared libraries), apply the same edit
+with patchelf and with elfpatch, and compare:
 
-* what `readelf -d -l` reports for `NEEDED`, `SONAME`, `RPATH`, `RUNPATH` and
-  the program interpreter, line by line;
+* what `readelf -d -l -V` reports for `NEEDED`, `SONAME`, `RPATH`, `RUNPATH`,
+  the program interpreter, the version-needed file names and the kinds of
+  program header, line by line;
 * every `--print-*` output, byte for byte, success and failure alike;
-* that the file did **not grow** (patchelf may move things, we must not);
-* that the patched program still **runs** (an edit that sets the rpath must find
-  its library with no `LD_LIBRARY_PATH`).
+* that `readelf -a` has no warning or error about the result;
+* that an edit in place did **not grow** the file;
+* that the patched program still **runs** with no `LD_LIBRARY_PATH` (for a
+  library: a program linked against the edited library, run), which is the only
+  test that the loader accepts the new layout.
 
-It runs in CI on Ubuntu (patchelf from apt) and is *required* there; on a
-machine without Linux, gcc, readelf or patchelf it skips with the reason stated.
-Nothing binary is committed: the fixtures are built from two tiny C files at
-test time. Synthetic images (`internal/elfgen`, all four class/endianness
-combinations) cover what gcc cannot build here, including merged string tails.
+The growth cases: a long interpreter (a copy of the real loader under a long
+path), a long rpath and one over 8 KiB, `--force-rpath`, an rpath where there is
+none (`--set-rpath`, `--add-rpath`), `--add-needed` once and twice,
+`--replace-needed` with a longer name and of `libm` (version needs),
+`--set-soname` on a library with and without one, `--page-size`, and
+combinations, on PIE and non-PIE executables and libraries.
+
+It runs in CI on Ubuntu against the patchelf from apt (the version the job
+prints; 0.18.0 on the current runner image), and is *required* there. A second
+job, `layout-oracle`, runs the growth cases against **patchelf 0.19.3 built from
+its tag** with `ELFPATCH_LAYOUT_STRICT=1`: the same `PT_LOAD` flags, the same
+file size and the same `readelf -l -S` tables as the release the engine was
+ported from. (Locally the lane also passed on linux/arm64, 64 KiB pages, and on
+linux/amd64 under emulation.) On a machine without Linux, gcc, readelf or
+patchelf it skips with the reason stated. Nothing binary is committed: the
+fixtures are built from small C files at test time. Synthetic images
+(`internal/elfgen`, all four class/endianness combinations, executables and
+libraries with section headers, three page sizes, notes, version needs, merged
+string tails) cover what gcc cannot build here.
+
+`FuzzGrow` feeds arbitrary bytes to the layout engine, every growth edit (with
+and without a forced page size, including one past the 2 GiB cap) and the
+verifier; its corpus is under `testdata/fuzz/FuzzGrow` and CI fuzzes it for 60
+seconds per run, next to `FuzzParse`.
 
 ## Benchmark
 

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/go-binfmt/elfpatch/internal/elfgen"
@@ -36,8 +37,9 @@ func TestGrowthEditGuards(t *testing.T) {
 	})
 	t.Run("invalid names", func(t *testing.T) {
 		f := mustParse(t, elfgen.BuildLayout(base))
-		if _, err := f.SetSoname("a\x00b"); err == nil {
-			t.Fatal("a NUL in a soname was accepted")
+		_, err := f.SetSoname("a\x00b")
+		if err == nil || !strings.Contains(err.Error(), "invalid soname") {
+			t.Fatalf("a NUL in a soname: %v", err)
 		}
 		for _, bad := range []string{"", "a\x00b"} {
 			if _, err := f.AddNeeded("libok.so", bad); err == nil {
@@ -232,4 +234,31 @@ func TestVerifyGrownGuards(t *testing.T) {
 		g := &File{data: plain}
 		wantMsg(t, verifyGrown(lay, plain, g), ErrVerify, "output layout")
 	})
+}
+
+// Several growths in a row: the program header table keeps growing in place
+// over the room the moved sections left, and must stay inside a mapping.
+func TestGrowthSequence(t *testing.T) {
+	for _, class := range []int{64, 32} {
+		for _, exec := range []bool{true, false} {
+			spec := elfgen.LSpec{Class: class, Exec: exec, Interp: "/lib/ld.so.1", Needed: []string{"libm.so.6"}, Soname: "libp.so", Rpath: "/a", Symbols: []string{"main"}, Notes: true}
+			img := elfgen.BuildLayout(spec)
+			f := mustParse(t, slices.Clone(img))
+			for i, step := range []func() ([]Change, error){
+				func() ([]Change, error) { return f.SetInterpreter(long(300)) },
+				func() ([]Change, error) { return f.AddRpath("/b", false) },
+				func() ([]Change, error) { return f.AddNeeded("libz.so.1", "liba.so.1") },
+				func() ([]Change, error) { return f.SetSoname("libnew-" + long(300)) },
+				func() ([]Change, error) { return f.ReplaceNeeded("libm.so.6", "libm-"+long(300)) },
+				func() ([]Change, error) { return f.SetRpath(long(900), true) },
+			} {
+				if _, err := step(); err != nil {
+					t.Fatalf("class %d exec %v step %d: %v", class, exec, i, err)
+				}
+				if err := verifyGrown(img, f.data, f); err != nil {
+					t.Fatalf("class %d exec %v step %d: %v", class, exec, i, err)
+				}
+			}
+		}
+	}
 }

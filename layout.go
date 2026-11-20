@@ -1057,6 +1057,24 @@ func (l *layout) normalizeNoteSegments() {
 
 func (l *layout) dynEntSize() uint64 { return 2 * l.word() }
 
+// coverPhdr makes the PT_LOAD that holds the program header table end after it.
+// patchelf lets the table grow in place over the room the moved sections left
+// without touching the segment, which after several growths can leave its tail
+// past the segment's end; extending a segment that has no memory-only tail
+// (memsz == filesz) costs nothing and keeps the table inside a mapping.
+func (l *layout) coverPhdr(off, size uint64) {
+	for i := range l.ph {
+		p := &l.ph[i]
+		if p.typ != ptLoad || p.off > off || off >= p.off+p.filesz || p.memsz != p.filesz {
+			continue
+		}
+		if end := off + size - p.off; end > p.filesz {
+			p.filesz, p.memsz = end, end
+		}
+		return
+	}
+}
+
 // rewriteHeaders writes the program and section header tables and fixes the
 // addresses in .dynamic and the section indices in the symbol tables.
 func (l *layout) rewriteHeaders(phdrAddress uint64) {
@@ -1066,6 +1084,7 @@ func (l *layout) rewriteHeaders(phdrAddress uint64) {
 			l.ph[i].vaddr, l.ph[i].paddr = phdrAddress, phdrAddress
 			sz := uint64(len(l.ph)) * l.phentsize()
 			l.ph[i].filesz, l.ph[i].memsz = sz, sz
+			l.coverPhdr(l.phoff(), sz)
 			break
 		}
 	}

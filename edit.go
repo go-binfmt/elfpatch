@@ -279,11 +279,9 @@ func (f *File) symCount(symVaddr uint64) (uint64, error) {
 
 // writeSlot overwrites the dynstr string at rel offset o (currently oldLen
 // bytes) with value, zero-padding to the old length. skip names the dynamic
-// entries that legitimately point at it.
+// entries that legitimately point at it. value must fit: callers that may be
+// handed a longer one grow instead.
 func (f *File) writeSlot(field string, o uint64, oldLen int, value string, skip map[int]bool) error {
-	if uint64(len(value)) > uint64(oldLen) {
-		return &NoSpaceError{Field: field, Have: uint64(oldLen) + 1, Need: uint64(len(value)) + 1}
-	}
 	shared, err := f.refsInto(o, uint64(oldLen), skip)
 	if err != nil {
 		return err
