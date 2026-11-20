@@ -192,36 +192,57 @@ Single core, process wall time, interleaved rounds, medians, against patchelf
 on the same files (`internal/bench`, run pinned with `taskset -c 0`). Fixtures
 are gcc-built executables with a long `-rpath` placeholder so every edit fits.
 
-Ubuntu x86-64 GitHub runner (the CI `bench` job, run 44719076189, pinned to one core
-with taskset, load average 0.7), patchelf 0.18.0 from apt, 60 interleaved rounds, median
-wall time of the whole process:
+Fixtures: gcc-built executables of three sizes, each linked twice: with a long
+`-rpath` placeholder (every edit fits in place) and with a short one (`-rpath /x`),
+for which the growth operations must grow the file.
+
+Ubuntu x86-64 GitHub runner (the CI `bench` job, run 44774158929 on this
+release's pull request, pinned to one core with taskset, load average 1.4), patchelf
+0.18.0 from apt, 60 interleaved rounds, median wall time of the whole process:
 
 | file | operation | patchelf | elfpatch | patchelf / elfpatch |
 |---|---|---:|---:|---:|
-| small (~16 KiB) | `--print-rpath` | 1.18ms | 1.94ms | 0.6x |
-| small (~16 KiB) | `--print-needed` | 1.16ms | 1.94ms | 0.6x |
-| small (~16 KiB) | `--set-rpath '$ORIGIN/lib'` | 1.34ms | 2.17ms | 0.6x |
-| small (~16 KiB) | `--remove-needed libm.so.6` | 1.33ms | 2.21ms | 0.6x |
-| 4 MiB | `--print-rpath` | 2.91ms | 2.01ms | 1.4x |
-| 4 MiB | `--print-needed` | 2.96ms | 2.04ms | 1.4x |
-| 4 MiB | `--set-rpath '$ORIGIN/lib'` | 10.55ms | 9.63ms | 1.1x |
-| 4 MiB | `--remove-needed libm.so.6` | 10.57ms | 9.66ms | 1.1x |
-| 32 MiB | `--print-rpath` | 18.35ms | 2.22ms | 8.3x |
-| 32 MiB | `--print-needed` | 18.39ms | 2.23ms | 8.3x |
-| 32 MiB | `--set-rpath '$ORIGIN/lib'` | 122.35ms | 102.19ms | 1.2x |
-| 32 MiB | `--remove-needed libm.so.6` | 122.35ms | 106.97ms | 1.1x |
+| small (~16 KiB) | `--print-rpath` | 1.08ms | 1.77ms | 0.6x |
+| small (~16 KiB) | `--print-needed` | 1.09ms | 1.77ms | 0.6x |
+| small (~16 KiB) | `--set-rpath '$ORIGIN/lib'` | 1.33ms | 2.09ms | 0.6x |
+| small (~16 KiB) | `--remove-needed libm.so.6` | 1.28ms | 2.10ms | 0.6x |
+| 4 MiB | `--print-rpath` | 3.28ms | 2.04ms | 1.6x |
+| 4 MiB | `--print-needed` | 3.24ms | 2.03ms | 1.6x |
+| 4 MiB | `--set-rpath '$ORIGIN/lib'` | 20.31ms | 19.08ms | 1.1x |
+| 4 MiB | `--remove-needed libm.so.6` | 18.43ms | 19.10ms | 1.0x |
+| 32 MiB | `--print-rpath` | 16.92ms | 2.33ms | 7.3x |
+| 32 MiB | `--print-needed` | 17.07ms | 2.35ms | 7.3x |
+| 32 MiB | `--set-rpath '$ORIGIN/lib'` | 122.47ms | 102.36ms | 1.2x |
+| 32 MiB | `--remove-needed libm.so.6` | 128.15ms | 102.17ms | 1.3x |
 
-On a developer machine (linux/arm64 container on Apple silicon, 30 rounds) the large-file
-edits are about even with patchelf (0.8-0.9x) and prints are 1.4-1.5x faster; the small-file
-gap is the same.
+**Growth** (phase 2), same run, the same fixtures linked with a short rpath, so that
+every operation moves sections and rewrites the headers:
 
-Reading it: a Go process starts slower than a C one, and the cobra command tree
-the fleet standardises on adds to that, so on a 16 KiB file elfpatch is behind
-by that fixed start-up cost. The work itself scales better: elfpatch maps the
-file and reads only the pages it needs, where patchelf reads the whole file, so
-prints on large binaries are faster. Edits create the new file with
-`copy_file_range` and verify it, which keeps them close to patchelf on large
-files. Tracked as an open performance issue; see the repository's issues.
+| file | operation | patchelf | elfpatch | patchelf / elfpatch |
+|---|---|---:|---:|---:|
+| small (~16 KiB) | `--set-rpath` (300 bytes) | 1.40ms | 2.26ms | 0.6x |
+| small (~16 KiB) | `--add-needed libextra.so.1` | 1.37ms | 2.19ms | 0.6x |
+| small (~16 KiB) | `--set-interpreter` (300 bytes) | 1.46ms | 2.24ms | 0.6x |
+| 4 MiB | `--set-rpath` (300 bytes) | 10.72ms | 12.98ms | 0.8x |
+| 4 MiB | `--add-needed libextra.so.1` | 17.46ms | 19.41ms | 0.9x |
+| 4 MiB | `--set-interpreter` (300 bytes) | 10.91ms | 18.51ms | 0.6x |
+| 32 MiB | `--set-rpath` (300 bytes) | 134.79ms | 114.67ms | 1.2x |
+| 32 MiB | `--add-needed libextra.so.1` | 132.10ms | 114.24ms | 1.2x |
+| 32 MiB | `--set-interpreter` (300 bytes) | 132.12ms | 114.38ms | 1.2x |
+
+Reading it. On 16 KiB files the gap is the fixed start-up cost of a Go process and
+the cobra command tree (tracked in elfpatch#2, a separate issue; growth adds about
+0.1 ms to it). On 32 MiB files growth is 1.2x faster than patchelf: elfpatch maps
+the file and writes the result once, where patchelf reads and writes it whole. **On
+4 MiB files growth is slower than patchelf (0.6-0.9x), which is an open defect**
+(go-binfmt/elfpatch#7): the file is copied into memory, written, mapped again and
+verified, and at this size that costs more than patchelf's read-modify-write. The
+4 MiB edit rows are also the noisiest on the shared runner: patchelf's own
+`--set-rpath` took 10.6 ms in the previous run and 20.3 ms in this one, so read
+them as a range, not a point. Not measured here: the effect of the page size
+(`--page-size`), and any machine other than the CI runner (a developer machine was
+under a load average of 15-23 while this was written, which is above the point where
+the fleet's rule says not to measure).
 
 ## Development
 
