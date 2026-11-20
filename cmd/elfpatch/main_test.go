@@ -129,14 +129,16 @@ func TestRefusals(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"--set-rpath", long, p}, "phase 2"},
-		{[]string{"--set-interpreter", long, p}, "phase 2"},
-		{[]string{"--add-needed", "libx.so", p}, "phase 2"},
-		{[]string{"--set-soname", "x", p}, "phase 2"},
-		{[]string{"--replace-needed", "libm.so.6", "libmuchlonger.so.6", p}, "phase 2"},
+		{[]string{"--set-rpath", long, p}, "cannot be grown"},
+		{[]string{"--set-interpreter", long, p}, "cannot be grown"},
+		{[]string{"--add-needed", "libx.so", p}, "no section headers"},
+		{[]string{"--set-soname", long, p}, "no section headers"},
+		{[]string{"--replace-needed", "libm.so.6", "libmuchlonger.so.6", p}, "cannot be grown"},
 		{[]string{"--replace-needed", "a"}, "two arguments"},
 		{[]string{"--bogus", p}, "unknown flag"},
 		{[]string{"--set-rpath", "/x"}, "no FILE"},
+		{[]string{"--set-os-abi", "FreeBSD", p}, "not supported"},
+		{[]string{"--set-rpath", "/a", "--add-rpath", "/b", p}, "not allowed with --add-rpath"},
 		{[]string{p}, "nothing to do"},
 		{[]string{"--print-needed", filepath.Join(t.TempDir(), "missing")}, "no such file"},
 	} {
@@ -152,12 +154,12 @@ func TestRefusals(t *testing.T) {
 	// prints on a file lacking the field
 	bare := filepath.Join(t.TempDir(), "bare")
 	os.WriteFile(bare, elfgen.Build(elfgen.Spec{}), 0o755)
-	for _, f := range []string{"--print-interpreter", "--print-soname"} {
+	for _, f := range []string{"--print-interpreter"} {
 		if _, _, err := do(t, f, bare); err == nil {
 			t.Fatal(f, "succeeded on a file without it")
 		}
 	}
-	if _, _, err := do(t, "--set-rpath", "/x", bare); err == nil || !strings.Contains(err.Error(), "phase 2") {
+	if _, _, err := do(t, "--set-rpath", "/x", bare); err == nil || !strings.Contains(err.Error(), "adding one needs growth") {
 		t.Fatal(err)
 	}
 	// not an ELF
@@ -174,7 +176,7 @@ func TestVersionAndHelp(t *testing.T) {
 		t.Fatal(out, err)
 	}
 	out, _, err = do(t, "--help")
-	if err != nil || !strings.Contains(out, "--set-rpath") || strings.Contains(out, "--add-needed") {
+	if err != nil || !strings.Contains(out, "--set-rpath") || !strings.Contains(out, "--add-needed") || strings.Contains(out, "--set-os-abi") {
 		t.Fatal(out, err)
 	}
 }

@@ -49,12 +49,25 @@ type NoSpaceError struct {
 	Field string // "interpreter", "rpath", "needed"
 	Have  uint64 // bytes available, NUL included
 	Need  uint64 // bytes required, NUL included
+	// Cause is why growth could not place the value either (no section
+	// headers, a layout patchelf refuses, ...); nil from the in-place editors.
+	Cause error
 }
 
 func (e *NoSpaceError) Error() string {
+	if e.Cause != nil {
+		return fmt.Sprintf("elfpatch: %s needs %d bytes but the slot holds %d, and the file cannot be grown: %v", e.Field, e.Need, e.Have, e.Cause)
+	}
 	return fmt.Sprintf("elfpatch: %s needs %d bytes but the slot holds %d: %v", e.Field, e.Need, e.Have, ErrNoSpace)
 }
-func (e *NoSpaceError) Unwrap() error { return ErrNoSpace }
+
+// Unwrap exposes ErrNoSpace and, when growth was tried, why it failed.
+func (e *NoSpaceError) Unwrap() []error {
+	if e.Cause != nil {
+		return []error{ErrNoSpace, e.Cause}
+	}
+	return []error{ErrNoSpace}
+}
 
 func corrupt(format string, a ...any) error {
 	return fmt.Errorf("%w: %s", ErrCorrupt, fmt.Sprintf(format, a...))
@@ -121,6 +134,14 @@ type File struct {
 	allowed []rng // byte ranges the edits declared (see File.write)
 	closer  func() error
 	touched touched
+
+	// Growth bookkeeping (phase 2). grown is set once an edit rewrote the
+	// layout: data is then a new image, and the verifier judges it by
+	// structure instead of by declared byte ranges.
+	grown      bool
+	forcedPage uint64            // --page-size, 0 = by e_machine
+	sections   []string          // sections an edit replaced (.interp, .dynstr, .dynamic)
+	renamed    map[string]string // DT_NEEDED renames, for the version-needed check
 }
 
 type rng struct{ off, end uint64 }

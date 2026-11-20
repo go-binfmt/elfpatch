@@ -76,19 +76,32 @@ func try(dir, name string, args ...string) (string, error) {
 
 var tagLine = regexp.MustCompile(`\((NEEDED|SONAME|RPATH|RUNPATH)\)\s+(.*)$`)
 var interpLine = regexp.MustCompile(`Requesting program interpreter: (.*)\]`)
+var verneedLine = regexp.MustCompile(`Version: \d+\s+File: (\S+)\s+Cnt:`)
+
+// segLine matches the program headers that are not PT_LOAD: how many of each
+// kind there are is part of the file's meaning (a stack that is not executable,
+// a RELRO); where the PT_LOADs sit is the layout, which may differ, and so may
+// the number of PT_NOTEs (patchelf splits one that covers several notes the
+// moment it relocates anything, and an edit in place relocates nothing).
+var segLine = regexp.MustCompile(`^\s+(PHDR|INTERP|DYNAMIC|NOTE|TLS|GNU_\w+|[A-Z_]+)\s+0x`)
 
 // dynamic reduces readelf output to the semantic lines.
 func dynamic(t *testing.T, readelf, file string) []string {
 	t.Helper()
-	var out []string
-	for _, l := range strings.Split(sh(t, "", readelf, "-W", "-d", "-l", file), "\n") {
+	var out, segs []string
+	for _, l := range strings.Split(sh(t, "", readelf, "-W", "-d", "-l", "-V", file), "\n") {
 		if m := tagLine.FindStringSubmatch(l); m != nil {
 			out = append(out, m[1]+" "+m[2])
 		} else if m := interpLine.FindStringSubmatch(l); m != nil {
 			out = append(out, "INTERP "+m[1])
+		} else if m := verneedLine.FindStringSubmatch(l); m != nil {
+			out = append(out, "VERNEED "+m[1])
+		} else if m := segLine.FindStringSubmatch(l); m != nil && m[1] != "LOAD" && m[1] != "NOTE" {
+			segs = append(segs, "SEG "+m[1])
 		}
 	}
-	return out
+	slices.Sort(segs)
+	return append(out, segs...)
 }
 
 func TestDifferentialAgainstPatchelf(t *testing.T) {
@@ -201,20 +214,6 @@ func TestDifferentialAgainstPatchelf(t *testing.T) {
 			if (werr == nil) != (herr == nil) || (werr == nil && w != h) {
 				t.Fatalf("%s: patchelf %q (%v) elfpatch %q (%v)", p, w, werr, h, herr)
 			}
-		}
-	})
-
-	t.Run("too long is refused and nothing is written", func(t *testing.T) {
-		got := filepath.Join(dir, "refuse")
-		data, _ := os.ReadFile(bins["runpath"])
-		os.WriteFile(got, data, 0o755)
-		out, err := try(dir, cli, "--set-rpath", "/"+strings.Repeat("q", 400), got)
-		if err == nil || !strings.Contains(out, "phase 2") {
-			t.Fatalf("want a phase 2 refusal, got %v %q", err, out)
-		}
-		after, _ := os.ReadFile(got)
-		if !bytes.Equal(after, data) {
-			t.Fatal("refusal wrote")
 		}
 	})
 }

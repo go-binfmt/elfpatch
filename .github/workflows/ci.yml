@@ -30,6 +30,32 @@ jobs:
       - name: test everything else
         run: go test -race -count=1 ./...
 
+  # The layout engine is a port of patchelf 0.19.3. Against that release built
+  # from its tag, the growth cases must agree on more than the semantic fields:
+  # the same PT_LOAD flags, the same file size and the same program and section
+  # header tables (readelf -l -S), byte for byte in readelf's rendering.
+  layout-oracle:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with: { go-version: '1.27.4' }
+      - name: patchelf 0.19.3 from its tag, gcc, readelf
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq patchelf gcc binutils cmake g++
+          git clone -q --depth 1 --branch 0.19.3 https://github.com/NixOS/patchelf.git "$RUNNER_TEMP/patchelf-src"
+          cmake -S "$RUNNER_TEMP/patchelf-src" -B "$RUNNER_TEMP/patchelf-build" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$RUNNER_TEMP/patchelf-build" -j4
+          "$RUNNER_TEMP/patchelf-build/src/patchelf" --version
+      - name: growth cases, strict layout comparison
+        env:
+          ELFPATCH_REQUIRE_DIFF: "1"
+          ELFPATCH_LAYOUT_STRICT: "1"
+        run: |
+          export ELFPATCH_PATCHELF="$RUNNER_TEMP/patchelf-build/src/patchelf"
+          go test -count=1 -v -run 'DifferentialGrowth' ./...
+
   # 32-bit: every offset is an int there, and a bound that is only right in
   # 64 bits is the kind of bug a 64-bit lane cannot show. Runs natively on the
   # amd64 runner.
@@ -55,6 +81,8 @@ jobs:
         with: { go-version: '1.27.4' }
       - name: fuzz FuzzParse for 60 seconds
         run: go test -run '^$' -fuzz '^FuzzParse$' -fuzztime 60s .
+      - name: fuzz FuzzGrow (the layout engine) for 60 seconds
+        run: go test -run '^$' -fuzz '^FuzzGrow$' -fuzztime 60s .
 
   # s390x is BIG-ENDIAN; the synthetic images cover both byte orders, and this
   # lane runs the code itself under that byte order.
