@@ -16,6 +16,9 @@ type Options struct {
 	DryRun bool   // compute and verify the change, write nothing
 	Output string // write here instead of replacing the input
 	Sync   bool   // fsync the temp file before the rename (durability across a crash)
+	// PageSize overrides the page size growth uses (patchelf --page-size);
+	// 0 picks it from e_machine as patchelf does.
+	PageSize uint64
 }
 
 type snapshot struct {
@@ -104,6 +107,12 @@ func verify(orig, out []byte, f *File) error {
 	if !bytes.Equal(orig[pos:], out[pos:]) {
 		return fmt.Errorf("%w: bytes changed outside the targeted field after offset %d", ErrVerify, pos)
 	}
+	return compareSnaps(o, g, f.touched)
+}
+
+// compareSnaps requires every field the edit did not claim to touch to read
+// back unchanged, and the identity of the file (class, machine, type) to stay.
+func compareSnaps(o, g *File, t touched) error {
 	so, err := o.snap()
 	if err != nil {
 		return err
@@ -112,7 +121,6 @@ func verify(orig, out []byte, f *File) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrVerify, err)
 	}
-	t := f.touched
 	bad := func(field string) error { return fmt.Errorf("%w: untouched field %s changed", ErrVerify, field) }
 	switch {
 	case t&tInterp == 0 && (so.interp != sg.interp || so.hasInterp != sg.hasInterp):
@@ -257,12 +265,23 @@ func patch(path string, opts Options, fn func(*File) ([]Change, error)) ([]Chang
 	if _, err := f.snap(); err != nil {
 		return nil, err
 	}
+	f.forcedPage = opts.PageSize
 	cs, err := fn(f)
 	if err != nil {
 		return nil, err
 	}
 	if len(cs) == 0 {
 		return nil, nil
+	}
+	if f.grown {
+		if opts.DryRun {
+			return cs, verifyGrown(orig, f.data, f)
+		}
+		dest := real
+		if opts.Output != "" {
+			dest = opts.Output
+		}
+		return cs, writeGrown(dest, st.Mode(), orig, f, opts.Sync)
 	}
 	if opts.DryRun {
 		return cs, verify(orig, work, f)
@@ -272,6 +291,48 @@ func patch(path string, opts Options, fn func(*File) ([]Change, error)) ([]Chang
 		dest = opts.Output
 	}
 	return cs, writeVerified(dest, src, size, st.Mode(), orig, f, opts.Sync)
+}
+
+// writeGrown writes a grown image: the whole new content into a temp file in
+// the destination's directory, then the same checks as writeVerified on the
+// bytes as they landed (they must equal the editor's image, and that image must
+// pass verifyGrown against the input), and only then the rename.
+func writeGrown(dest string, mode os.FileMode, orig []byte, f *File, sync bool) (err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(dest), ".elfpatch-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer func() {
+		if err != nil {
+			tmp.Close()
+			os.Remove(name)
+		}
+	}()
+	if n, err := tmp.Write(f.data); err != nil || n != len(f.data) {
+		return fmt.Errorf("elfpatch: writing %s: %d of %d bytes: %v", name, n, len(f.data), err)
+	}
+	if err := tmp.Chmod(mode & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)); err != nil {
+		return err
+	}
+	if sync {
+		if err := tmp.Sync(); err != nil {
+			return err
+		}
+	}
+	out, unmap, err := mapFile(tmp, len(f.data), false)
+	if err != nil {
+		return err
+	}
+	err = verifyGrown(orig, out, f) // the file as written, not as intended
+	unmap()
+	if err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, dest)
 }
 
 func writeVerified(dest string, src *os.File, size int, mode os.FileMode, orig []byte, f *File, sync bool) (err error) {

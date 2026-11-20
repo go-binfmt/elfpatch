@@ -53,25 +53,30 @@ type opts struct {
 	printSoname                        bool
 	force, removeRpath, shrink         bool
 	removeNeeded, replaceNeeded        []string
+	addNeeded                          []string
+	setSoname, addRpath                string
+	setSonameSet, addRpathSet          bool
+	pageSize                           uint64
 	dryRun                             bool
 	output                             string
 	version                            bool
-	phase2                             map[string]*string
+	unsupported                        map[string]*string
 }
 
-// phase2Flags are patchelf operations that need the file to grow; they are
-// accepted so the refusal can say why, instead of "unknown flag".
-var phase2Flags = []string{"add-needed", "set-soname", "add-rpath", "page-size", "set-os-abi", "add-debug-tag", "no-default-lib", "clear-symbol-version", "rename-dynamic-symbols"}
+// unsupportedFlags are patchelf operations elfpatch does not implement; they
+// are accepted so the refusal can say so, instead of "unknown flag".
+var unsupportedFlags = []string{"set-os-abi", "add-debug-tag", "no-default-lib", "clear-symbol-version", "rename-dynamic-symbols", "build-resolution-cache"}
 
 // RootCmd builds the command.
 func RootCmd() *cobra.Command {
-	o := &opts{phase2: map[string]*string{}}
+	o := &opts{unsupported: map[string]*string{}}
 	cmd := &cobra.Command{
 		Use:   "elfpatch [options] FILE...",
-		Short: "patchelf-compatible ELF editor (phase 1: in place only)",
-		Long: "elfpatch reads and edits the interpreter, RPATH/RUNPATH and DT_NEEDED of ELF files.\n" +
-			"Edits are in place (zero-padded) and verified by re-parsing the output; a value that\n" +
-			"does not fit is refused (exit 1, nothing written). Growing .dynstr or PT_INTERP is phase 2.",
+		Short: "patchelf-compatible ELF editor",
+		Long: "elfpatch reads and edits the interpreter, RPATH/RUNPATH, DT_SONAME and DT_NEEDED of ELF files.\n" +
+			"A value that fits is written in place; one that does not grows the file the way patchelf\n" +
+			"does (a new or extended PT_LOAD). Every result is re-parsed and verified before it is renamed\n" +
+			"over the input; a file that cannot be grown or verified is refused (exit 1, nothing written).",
 		SilenceUsage:       true,
 		SilenceErrors:      true,
 		DisableFlagParsing: true, // --replace-needed takes two arguments; see mergePairs
@@ -86,9 +91,13 @@ func RootCmd() *cobra.Command {
 		},
 	}
 	fl := cmd.Flags()
-	fl.StringVar(&o.setInterp, "set-interpreter", "", "set PT_INTERP (must fit the existing slot)")
+	fl.StringVar(&o.setInterp, "set-interpreter", "", "set PT_INTERP (in place when it fits, else the file grows)")
 	fl.BoolVar(&o.printInterp, "print-interpreter", false, "print PT_INTERP")
-	fl.StringVar(&o.setRpath, "set-rpath", "", "set DT_RUNPATH (DT_RPATH with --force-rpath); must fit the existing slot")
+	fl.StringVar(&o.setRpath, "set-rpath", "", "set DT_RUNPATH (DT_RPATH with --force-rpath); adds the entry when there is none")
+	fl.StringVar(&o.addRpath, "add-rpath", "", "append DIRS to the search path (adds a DT_RUNPATH when there is none)")
+	fl.StringVar(&o.setSoname, "set-soname", "", "set DT_SONAME of a shared library")
+	fl.StringArrayVar(&o.addNeeded, "add-needed", nil, "add a DT_NEEDED entry for LIB at the top of .dynamic (repeatable)")
+	fl.Uint64Var(&o.pageSize, "page-size", 0, "page size to use when the file grows (default: by machine, as patchelf)")
 	fl.BoolVar(&o.printRpath, "print-rpath", false, "print DT_RUNPATH, else DT_RPATH")
 	fl.BoolVar(&o.force, "force-rpath", false, "with --set-rpath, use DT_RPATH instead of DT_RUNPATH")
 	fl.BoolVar(&o.removeRpath, "remove-rpath", false, "delete DT_RPATH/DT_RUNPATH")
@@ -96,13 +105,13 @@ func RootCmd() *cobra.Command {
 	fl.BoolVar(&o.printNeed, "print-needed", false, "print DT_NEEDED, one per line")
 	fl.BoolVar(&o.printSoname, "print-soname", false, "print DT_SONAME")
 	fl.StringArrayVar(&o.removeNeeded, "remove-needed", nil, "remove DT_NEEDED entries named LIB (repeatable)")
-	fl.StringArrayVar(&o.replaceNeeded, "replace-needed", nil, "LIB NEW_LIB: rename DT_NEEDED LIB in place (two arguments; repeatable)")
+	fl.StringArrayVar(&o.replaceNeeded, "replace-needed", nil, "LIB NEW_LIB: rename DT_NEEDED LIB (two arguments; repeatable)")
 	fl.BoolVar(&o.dryRun, "dry-run", false, "print the changes, verify them, write nothing")
 	fl.StringVar(&o.output, "output", "", "write the result here instead of replacing FILE")
 	fl.BoolVar(&o.version, "version", false, "print the version")
 	fl.BoolP("help", "h", false, "help")
-	for _, n := range phase2Flags {
-		o.phase2[n] = fl.String(n, "", "phase 2 (needs growth): not implemented")
+	for _, n := range unsupportedFlags {
+		o.unsupported[n] = fl.String(n, "", "not implemented")
 		_ = fl.MarkHidden(n)
 	}
 	return cmd
@@ -131,10 +140,14 @@ func run(cmd *cobra.Command, o *opts, files []string) error {
 	}
 	fl := cmd.Flags()
 	o.setInterpSet, o.setRpathSet = fl.Changed("set-interpreter"), fl.Changed("set-rpath")
-	for _, n := range phase2Flags {
+	o.setSonameSet, o.addRpathSet = fl.Changed("set-soname"), fl.Changed("add-rpath")
+	for _, n := range unsupportedFlags {
 		if fl.Changed(n) {
-			return fmt.Errorf("--%s is not supported yet: it needs the file to grow, which is phase 2 (see README)", n)
+			return fmt.Errorf("--%s is not supported by elfpatch (see README)", n)
 		}
+	}
+	if o.setRpathSet && o.addRpathSet {
+		return errors.New("--set-rpath option not allowed with --add-rpath") // patchelf's own message
 	}
 	for _, p := range o.replaceNeeded {
 		if strings.Count(p, sep) != 1 {
@@ -147,7 +160,8 @@ func run(cmd *cobra.Command, o *opts, files []string) error {
 	if o.output != "" && len(files) != 1 {
 		return errors.New("--output needs exactly one FILE")
 	}
-	edits := o.setInterpSet || o.setRpathSet || o.removeRpath || o.shrink || len(o.removeNeeded) > 0 || len(o.replaceNeeded) > 0
+	edits := o.setInterpSet || o.setRpathSet || o.addRpathSet || o.setSonameSet || o.removeRpath || o.shrink ||
+		len(o.removeNeeded) > 0 || len(o.replaceNeeded) > 0 || len(o.addNeeded) > 0
 	if !edits && !o.printInterp && !o.printRpath && !o.printNeed && !o.printSoname {
 		return errors.New("nothing to do (try --help)")
 	}
@@ -177,15 +191,14 @@ func one(cmd *cobra.Command, o *opts, file string, edits bool) error {
 			}
 			fmt.Fprintln(out, s)
 		}
-		if o.printSoname {
+		if o.printSoname && f.Type == 3 { // patchelf: only shared objects (ET_DYN) have a soname to print
 			s, ok, err := f.Soname()
 			if err != nil {
 				return err
 			}
-			if !ok {
-				return errors.New("no DT_SONAME")
+			if ok && s != "" { // patchelf prints nothing when there is none, and exits 0
+				fmt.Fprintln(out, s)
 			}
-			fmt.Fprintln(out, s)
 		}
 		if o.printRpath {
 			s, _, err := f.SearchPath()
@@ -212,12 +225,39 @@ func one(cmd *cobra.Command, o *opts, file string, edits bool) error {
 
 func edit(cmd *cobra.Command, o *opts, file string) error {
 	out := cmd.OutOrStdout()
-	po := elfpatch.Options{DryRun: o.dryRun, Output: o.output}
+	po := elfpatch.Options{DryRun: o.dryRun, Output: o.output, PageSize: o.pageSize}
 	cs, err := elfpatch.Patch(file, po, func(f *elfpatch.File) ([]elfpatch.Change, error) {
 		var all []elfpatch.Change
 		add := func(cs []elfpatch.Change, err error) error { all = append(all, cs...); return err }
+		// patchelf's order (patchElf2): soname, interpreter, one rpath
+		// operation (shrink, else remove, else set, else add), then the
+		// needed entries removed, replaced, added.
+		if o.setSonameSet {
+			if err := add(f.SetSoname(o.setSoname)); err != nil {
+				return nil, err
+			}
+		}
 		if o.setInterpSet {
 			if err := add(f.SetInterpreter(o.setInterp)); err != nil {
+				return nil, err
+			}
+		}
+		var err error
+		switch {
+		case o.shrink:
+			err = add(f.ShrinkRpath(elfpatch.OriginDir(file)))
+		case o.removeRpath:
+			err = add(f.RemoveRpath())
+		case o.setRpathSet:
+			err = add(f.SetRpath(o.setRpath, o.force))
+		case o.addRpathSet:
+			err = add(f.AddRpath(o.addRpath, o.force))
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, n := range o.removeNeeded {
+			if err := add(f.RemoveNeeded(n)); err != nil {
 				return nil, err
 			}
 		}
@@ -227,30 +267,15 @@ func edit(cmd *cobra.Command, o *opts, file string) error {
 				return nil, err
 			}
 		}
-		for _, n := range o.removeNeeded {
-			if err := add(f.RemoveNeeded(n)); err != nil {
-				return nil, err
-			}
-		}
-		if o.setRpathSet {
-			if err := add(f.SetRpath(o.setRpath, o.force)); err != nil {
-				return nil, err
-			}
-		}
-		if o.removeRpath {
-			if err := add(f.RemoveRpath()); err != nil {
-				return nil, err
-			}
-		}
-		if o.shrink {
-			if err := add(f.ShrinkRpath(elfpatch.OriginDir(file))); err != nil {
+		if len(o.addNeeded) > 0 {
+			if err := add(f.AddNeeded(o.addNeeded...)); err != nil {
 				return nil, err
 			}
 		}
 		return all, nil
 	})
 	if err != nil {
-		return err // ErrNoSpace and ErrNoRpath already name phase 2
+		return err
 	}
 	if o.dryRun {
 		for _, c := range cs {

@@ -30,8 +30,10 @@ func (f *File) write(off uint64, b []byte) {
 
 func hasNUL(s string) bool { return strings.IndexByte(s, 0) >= 0 }
 
-// SetInterpreter overwrites PT_INTERP in place, zero-padding the slot. It
-// returns a *NoSpaceError (ErrNoSpace) when value+NUL exceeds p_filesz.
+// SetInterpreter overwrites PT_INTERP in place, zero-padding the slot, when the
+// value fits p_filesz. A longer value grows the file the way patchelf does
+// (.interp moves to new space); a file that cannot be grown (no section
+// headers) gets a *NoSpaceError (ErrNoSpace) and is left alone.
 func (f *File) SetInterpreter(value string) ([]Change, error) {
 	p := f.interp
 	if p == nil {
@@ -44,15 +46,18 @@ func (f *File) SetInterpreter(value string) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
-	if need := uint64(len(value)) + 1; need > p.filesz {
-		return nil, &NoSpaceError{Field: "interpreter", Have: p.filesz, Need: need}
-	}
 	if old == value {
 		return nil, nil
 	}
-	buf := make([]byte, p.filesz)
-	copy(buf, value)
-	f.write(p.off, buf)
+	if need := uint64(len(value)) + 1; need > p.filesz {
+		if err := f.growInterpreter(value); err != nil {
+			return nil, &NoSpaceError{Field: "interpreter", Have: p.filesz, Need: need, Cause: err}
+		}
+	} else {
+		buf := make([]byte, p.filesz)
+		copy(buf, value)
+		f.write(p.off, buf)
+	}
 	f.touched |= tInterp
 	if got, _, err := f.Interpreter(); err != nil || got != value {
 		return nil, fmt.Errorf("%w: interpreter reads back %q", ErrVerify, got)
@@ -334,8 +339,22 @@ func (f *File) SetRpath(value string, force bool) ([]Change, error) {
 	if hasRun && hasRp {
 		return nil, fmt.Errorf("%w: both DT_RPATH and DT_RUNPATH are present", ErrAmbiguous)
 	}
+	want := int64(dtRunpath)
+	if force {
+		want = dtRpath
+	}
 	if !hasRun && !hasRp {
-		return nil, ErrNoRpath
+		if value == "" {
+			return nil, nil // patchelf: nothing to set, nothing to empty
+		}
+		if err := f.addStringTag(want, value); err != nil {
+			return nil, fmt.Errorf("%w: adding one needs growth: %v", ErrNoRpath, err)
+		}
+		f.touched |= tRpath | tRunpath
+		if got, _, err := f.SearchPath(); err != nil || got != value {
+			return nil, fmt.Errorf("%w: search path reads back %q", ErrVerify, got)
+		}
+		return []Change{{strings.ToLower(strings.TrimPrefix(tagName(want), "DT_")), "", value}}, nil
 	}
 	idx, field := ri, "runpath"
 	if hasRp {
@@ -345,15 +364,26 @@ func (f *File) SetRpath(value string, force bool) ([]Change, error) {
 	if err != nil {
 		return nil, err
 	}
-	want := int64(dtRunpath)
-	if force {
-		want = dtRpath
-	}
 	if old == value && f.dyn[idx].tag == want {
 		return nil, nil
 	}
-	if err := f.writeSlot(field, f.dyn[idx].val, len(old), value, map[int]bool{idx: true}); err != nil {
-		return nil, err
+	skip := map[int]bool{idx: true}
+	shared, serr := f.refsInto(f.dyn[idx].val, uint64(len(old)), skip)
+	fits := len(value) <= len(old)
+	if fits && serr != nil {
+		return nil, serr // sharing cannot be judged: as in place, refuse
+	}
+	if fits && !shared {
+		if err := f.writeSlot(field, f.dyn[idx].val, len(old), value, skip); err != nil {
+			return nil, err
+		}
+	} else if old != value {
+		// Too long, or the string is shared: like patchelf, append the new
+		// value to .dynstr and point the entry at it (the old string is wiped
+		// only when nothing else refers to it).
+		if err := f.setStringTag(idx, value, !shared && serr == nil, len(old)); err != nil {
+			return nil, growErr(field, uint64(len(old))+1, uint64(len(value))+1, shared, err)
+		}
 	}
 	var cs []Change
 	if f.dyn[idx].tag != want {
@@ -438,13 +468,21 @@ func (f *File) RemoveNeeded(name string) ([]Change, error) {
 	return cs, nil
 }
 
-// ReplaceNeeded renames every DT_NEEDED entry old to new in place.
+// ReplaceNeeded renames every DT_NEEDED entry old to new. A name that fits the
+// old string, with nothing else pointing at it, is written in place; otherwise
+// it is appended to .dynstr as patchelf does (a replacement that is a suffix of
+// the old name just points into it), and the version-needed file names that
+// carry the old name follow.
 func (f *File) ReplaceNeeded(old, new string) ([]Change, error) {
 	if new == "" || hasNUL(new) {
 		return nil, fmt.Errorf("elfpatch: invalid library name %q", new)
 	}
+	if old == new {
+		return nil, nil
+	}
 	done := map[uint64]bool{}
 	var cs []Change
+	var growIdx []int
 	for _, e := range f.dyn {
 		if e.tag != dtNeeded || done[e.val] {
 			continue
@@ -453,7 +491,7 @@ func (f *File) ReplaceNeeded(old, new string) ([]Change, error) {
 		if err != nil {
 			return nil, err
 		}
-		if s != old || old == new {
+		if s != old {
 			continue
 		}
 		skip := map[int]bool{}
@@ -462,12 +500,38 @@ func (f *File) ReplaceNeeded(old, new string) ([]Change, error) {
 				skip[j] = true
 			}
 		}
-		if err := f.writeSlot("needed", e.val, len(s), new, skip); err != nil {
-			return nil, err
-		}
 		done[e.val] = true
+		shared, serr := f.refsInto(e.val, uint64(len(s)), skip)
+		if len(new) <= len(s) && serr != nil {
+			return nil, serr
+		}
+		if len(new) <= len(s) && !shared {
+			if err := f.writeSlot("needed", e.val, len(s), new, skip); err != nil {
+				return nil, err
+			}
+			f.touched |= tNeeded
+			cs = append(cs, Change{"needed", old, new})
+			continue
+		}
+		for j := range skip {
+			growIdx = append(growIdx, j)
+		}
+	}
+	if len(growIdx) > 0 {
+		slices.Sort(growIdx)
+		if err := f.growReplace(old, new, growIdx); err != nil {
+			return nil, growErr("needed", uint64(len(old))+1, uint64(len(new))+1, len(new) <= len(old), err)
+		}
 		f.touched |= tNeeded
-		cs = append(cs, Change{"needed", old, new})
+		for range growIdx {
+			cs = append(cs, Change{"needed", old, new})
+		}
+	}
+	if len(cs) > 0 {
+		if f.renamed == nil {
+			f.renamed = map[string]string{}
+		}
+		f.renamed[old] = new
 	}
 	return cs, nil
 }
