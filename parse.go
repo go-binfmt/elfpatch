@@ -25,6 +25,9 @@ var (
 	ErrNotELF      = errors.New("elfpatch: not an ELF file")
 	ErrCorrupt     = errors.New("elfpatch: malformed ELF")
 	ErrUnsupported = errors.New("elfpatch: unsupported ELF feature")
+	// ErrSegmentRange: a program header's file range lies outside the image.
+	// The error also satisfies errors.Is(err, ErrCorrupt).
+	ErrSegmentRange = errors.New("elfpatch: program header outside the file")
 	// ErrNoSpace means the new value is longer than the slot reserved in the
 	// file. Phase 2 grows the slot; phase 1 refuses.
 	ErrNoSpace = errors.New("elfpatch: new value does not fit in place (needs growth, phase 2)")
@@ -102,8 +105,30 @@ var maxFile uint64 = math.MaxInt32
 type prog struct {
 	typ           uint32
 	off, vaddr    uint64
+	paddr         uint64
 	filesz, memsz uint64
 	hdrOff        uint64 // where this header sits in the file
+}
+
+// Prog is a read-only copy of one program header, in file order.
+type Prog struct {
+	Type   uint32 // p_type, e.g. 1 for PT_LOAD
+	Off    uint64 // p_offset: where the segment starts in the file
+	Vaddr  uint64 // p_vaddr
+	Paddr  uint64 // p_paddr, the load address a flat image uses
+	Filesz uint64 // p_filesz: bytes in the file; checked to lie inside it
+	Memsz  uint64 // p_memsz
+}
+
+// Progs returns a copy of the program headers in file order. Every segment
+// with Filesz > 0 was checked by Parse to lie inside the image without
+// overflowing, whatever its type.
+func (f *File) Progs() []Prog {
+	out := make([]Prog, len(f.progs))
+	for i, p := range f.progs {
+		out[i] = Prog{Type: p.typ, Off: p.off, Vaddr: p.vaddr, Paddr: p.paddr, Filesz: p.filesz, Memsz: p.memsz}
+	}
+	return out
 }
 
 type dynEnt struct {
@@ -118,6 +143,7 @@ type File struct {
 	Order   binary.ByteOrder
 	Type    uint16
 	Machine uint16
+	Entry   uint64 // e_entry
 
 	data  []byte
 	progs []prog
@@ -208,6 +234,11 @@ func Parse(data []byte) (*File, error) {
 		phentsize, phnum = f.Order.Uint16(data[54:]), f.Order.Uint16(data[56:])
 	}
 	f.Type, f.Machine = f.Order.Uint16(data[16:]), f.Order.Uint16(data[18:])
+	if f.Class == 32 {
+		f.Entry = uint64(f.Order.Uint32(data[24:]))
+	} else {
+		f.Entry = f.Order.Uint64(data[24:])
+	}
 
 	if phnum == 0xffff {
 		return nil, fmt.Errorf("%w: extended program header count (PN_XNUM)", ErrUnsupported)
@@ -234,13 +265,15 @@ func Parse(data []byte) (*File, error) {
 		p.typ = f.Order.Uint32(b)
 		if f.Class == 32 {
 			p.off, p.vaddr = uint64(f.Order.Uint32(b[4:])), uint64(f.Order.Uint32(b[8:]))
+			p.paddr = uint64(f.Order.Uint32(b[12:]))
 			p.filesz, p.memsz = uint64(f.Order.Uint32(b[16:])), uint64(f.Order.Uint32(b[20:]))
 		} else {
 			p.off, p.vaddr = f.Order.Uint64(b[8:]), f.Order.Uint64(b[16:])
+			p.paddr = f.Order.Uint64(b[24:])
 			p.filesz, p.memsz = f.Order.Uint64(b[32:]), f.Order.Uint64(b[40:])
 		}
 		if p.filesz > 0 && !inRange(p.off, p.filesz, n) {
-			return nil, corrupt("program header %d: [%d,+%d) outside file of %d bytes", i, p.off, p.filesz, n)
+			return nil, fmt.Errorf("%w: %w", ErrSegmentRange, corrupt("program header %d: [%d,+%d) outside file of %d bytes", i, p.off, p.filesz, n))
 		}
 		f.progs = append(f.progs, p)
 	}
